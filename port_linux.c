@@ -15,7 +15,7 @@ static speed_t baud_to_speed(int baud) {
     case 57600:  return B57600;
     case 115200: return B115200;
     case 230400: return B230400;
-    default:     return B0;  /* add more here if you need them */
+    default:     return B0;  /*B0 is a hang up. add more here if you need them */
     }
 }
 

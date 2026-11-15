@@ -41,26 +41,47 @@
 /* Return codes (0 = success, negative = failure) */
 enum {
     BNB_OK         =  0,
-    BNB_TIMEOUT    = -1,  /* no data arrived in time */
+    BNB_NO_FRAME   = -1,  /* no complete frame yet (not an error: try again later) */
     BNB_ERR_IO     = -2,  /* port read/write failed */
     BNB_ERR_FRAME  = -3,  /* bad length or missing end byte */
     BNB_ERR_CRC    = -4,  /* checksum mismatch */
-    BNB_ERR_SIZE   = -5,  /* payload too big to send, or buffer too small to receive into */
+    BNB_ERR_SIZE   = -5,  /* payload too big to send */
 };
 
 /* Send one message. */
 int bnb_send(int port, const void *payload, size_t len);
 
 /*
- * Wait for one message. The payload is copied into buf and NUL-terminated
- * (so buf_size must be at least payload length + 1), ready for cJSON_Parse.
+ * Receiver state. Declare one per port and zero it before first use:
  *
- * timeout_ms is how long to wait for each incoming byte.
+ *     bnb_rx_t rx = {0};
  *
- * On any error other than BNB_ERR_IO, just call again: the next call skips
- * ahead to the next start byte, so the stream resyncs by itself.
+ * It remembers a half-received frame between calls, which is what lets
+ * bnb_receive return without blocking.
  */
-int bnb_receive(int port, uint8_t *buf, size_t buf_size, size_t *len, int timeout_ms);
+typedef struct {
+    uint8_t buf[BNB_MAX_PAYLOAD + 6];  /* frame being assembled */
+    size_t  count;                     /* bytes of it received so far */
+    const uint8_t *payload;            /* set on BNB_OK: NUL-terminated payload ... */
+    size_t  len;                       /* ... and its length. Valid until the next bnb_receive call. */
+} bnb_rx_t;
+
+/*
+ * Read whatever bytes are available and try to finish a frame.
+ *
+ *   BNB_OK        a valid frame is ready in rx->payload / rx->len
+ *   BNB_NO_FRAME  not enough data yet; call again later (progress is kept)
+ *   BNB_ERR_CRC / BNB_ERR_FRAME   a bad frame was dropped; just call again
+ *   BNB_ERR_IO    the port failed
+ *
+ * timeout_ms is how long to wait for each incoming byte:
+ *   0   never wait: return immediately if nothing is waiting (non-blocking)
+ *   >0  wait up to this long for more bytes (blocking)
+ *
+ * After BNB_OK, call again to get the next frame; any bytes already received
+ * for it are still waiting in the port.
+ */
+int bnb_receive(int port, bnb_rx_t *rx, int timeout_ms);
 
 /* CRC helper. Start with BNB_CRC_INIT; pass the result back in to continue. */
 uint16_t bnb_crc16(uint16_t crc, const void *data, size_t len);
@@ -70,7 +91,8 @@ uint16_t bnb_crc16(uint16_t crc, const void *data, size_t len);
 /* Write all len bytes. Return bytes written, or -1 on error. */
 int bnb_port_write(int port, const uint8_t *data, size_t len);
 
-/* Read one byte, waiting up to timeout_ms. Return 1 = got a byte, 0 = timeout, -1 = error. */
+/* Read one byte, waiting up to timeout_ms (0 = don't wait).
+   Return 1 = got a byte, 0 = nothing available, -1 = error. */
 int bnb_port_read_byte(int port, uint8_t *byte, int timeout_ms);
 
 /* ---- Opening a port (platform specific; each returns a port or -1) ---- */

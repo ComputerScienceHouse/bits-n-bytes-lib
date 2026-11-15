@@ -31,45 +31,44 @@ int bnb_send(int port, const void *payload, size_t len) {
     return (bnb_port_write(port, frame, total) == (int)total) ? BNB_OK : BNB_ERR_IO;
 }
 
-/* Read exactly n bytes. */
-static int read_exact(int port, uint8_t *dst, size_t n, int timeout_ms) {
-    for (size_t i = 0; i < n; i++) {
-        int r = bnb_port_read_byte(port, &dst[i], timeout_ms);
-        if (r == 0) return BNB_TIMEOUT;
-        if (r < 0)  return BNB_ERR_IO;
+/*
+ * Add one received byte to the frame being assembled.
+ * Returns 1 = frame complete, 0 = need more bytes, <0 = bad frame (dropped).
+ */
+static int feed(bnb_rx_t *rx, uint8_t b) {
+    if (rx->count == 0 && b != BNB_START) return 0;  /* skipping noise until a start byte */
+    rx->buf[rx->count++] = b;
+
+    if (rx->count < 3) return 0;                     /* still reading the length */
+    size_t n = ((size_t)rx->buf[1] << 8) | rx->buf[2];
+    if (n > BNB_MAX_PAYLOAD) {
+        rx->count = 0;
+        return BNB_ERR_FRAME;
     }
-    return BNB_OK;
+    if (rx->count < n + 6) return 0;                 /* still reading payload / CRC / end */
+
+    /* Whole frame is here: [start][len 2][payload n][crc 2][end] */
+    rx->count = 0;
+    uint16_t expected = bnb_crc16(BNB_CRC_INIT, &rx->buf[1], n + 2);
+    uint16_t received = (uint16_t)((rx->buf[3 + n] << 8) | rx->buf[4 + n]);
+    if (received != expected)     return BNB_ERR_CRC;
+    if (rx->buf[5 + n] != BNB_END) return BNB_ERR_FRAME;
+
+    rx->buf[3 + n] = '\0';                           /* safe: CRC byte already checked */
+    rx->payload = &rx->buf[3];
+    rx->len = n;
+    return 1;
 }
 
-int bnb_receive(int port, uint8_t *buf, size_t buf_size, size_t *len, int timeout_ms) {
-    int err;
-    uint8_t b;
+int bnb_receive(int port, bnb_rx_t *rx, int timeout_ms) {
+    for (;;) {
+        uint8_t b;
+        int r = bnb_port_read_byte(port, &b, timeout_ms);
+        if (r == 0) return BNB_NO_FRAME;
+        if (r < 0)  return BNB_ERR_IO;
 
-    /* 1. Skip bytes until the start marker */
-    do {
-        if ((err = read_exact(port, &b, 1, timeout_ms)) != BNB_OK) return err;
-    } while (b != BNB_START);
-
-    /* 2. Length */
-    uint8_t length_bytes[2];
-    if ((err = read_exact(port, length_bytes, 2, timeout_ms)) != BNB_OK) return err;
-    size_t n = ((size_t)length_bytes[0] << 8) | length_bytes[1];
-    if (n > BNB_MAX_PAYLOAD) return BNB_ERR_FRAME;
-    if (n + 1 > buf_size)    return BNB_ERR_SIZE;
-
-    /* 3. Payload, CRC, end marker */
-    if ((err = read_exact(port, buf, n, timeout_ms)) != BNB_OK) return err;
-    uint8_t tail[3];
-    if ((err = read_exact(port, tail, 3, timeout_ms)) != BNB_OK) return err;
-
-    /* 4. Validate */
-    uint16_t expected = bnb_crc16(BNB_CRC_INIT, length_bytes, 2);
-    expected = bnb_crc16(expected, buf, n);
-    uint16_t received = (uint16_t)((tail[0] << 8) | tail[1]);
-    if (received != expected) return BNB_ERR_CRC;
-    if (tail[2] != BNB_END)   return BNB_ERR_FRAME;
-
-    buf[n] = '\0';
-    if (len) *len = n;
-    return BNB_OK;
+        int result = feed(rx, b);
+        if (result == 1) return BNB_OK;
+        if (result < 0)  return result;
+    }
 }
